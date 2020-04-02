@@ -43,7 +43,7 @@ def read_image(file_name, format=None):
         format (str): one of the supported image modes in PIL, or "BGR"
 
     Returns:
-        image (np.ndarray): an HWC image in the given format.
+        image (np.ndarray): an HWC image
     """
     with PathManager.open(file_name, "rb") as f:
         image = Image.open(f)
@@ -283,10 +283,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
                         " COCO-style RLE as a dict, or a full-image segmentation mask "
                         "as a 2D ndarray.".format(type(segm))
                     )
-            # torch.from_numpy does not support array with negative stride.
-            masks = BitMasks(
-                torch.stack([torch.from_numpy(np.ascontiguousarray(x)) for x in masks])
-            )
+            masks = BitMasks(torch.stack([torch.from_numpy(x) for x in masks]))
         target.gt_masks = masks
 
     if len(annos) and "keypoints" in annos[0]:
@@ -460,6 +457,6 @@ def build_transform_gen(cfg, is_train):
     tfm_gens = []
     tfm_gens.append(T.ResizeShortestEdge(min_size, max_size, sample_style))
     if is_train:
-        tfm_gens.append(T.RandomFlip())
+        #tfm_gens.append(T.RandomFlip())
         logger.info("TransformGens used in training: " + str(tfm_gens))
     return tfm_gens
