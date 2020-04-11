@@ -52,7 +52,7 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     weights = []
     gt_masks = []
     overlap = []
-    kernel = np.ones((2, 2),np.uint8)
+    kernel = np.ones((3, 3),np.uint8)
     roi_weights = []
     for instances_per_image in instances:
         # search for each ground truth mask for each instance
