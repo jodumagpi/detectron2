@@ -47,6 +47,9 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     total_num_masks = pred_mask_logits.size(0)
     mask_side_len = pred_mask_logits.size(2)
     assert pred_mask_logits.size(2) == pred_mask_logits.size(3), "Mask prediction must be square!"
+	
+	EDGE_WEIGHT = 2
+	print('\nEdge weights:{}\n'.format(EDGE_WEIGHT))
 
     gt_classes = []
     weights = []
@@ -140,7 +143,7 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     overlap = quad(overlap).to(dtype=torch.float32, device=pred_mask_logits.device)
 	
     weights = cat(weights, dim=0)
-    weights = torch.from_numpy(np.where(weights == False, 1, 2)).to(dtype=torch.float32, device=pred_mask_logits.device)
+    weights = torch.from_numpy(np.where(weights == False, 1, EDGE_WEIGHT)).to(dtype=torch.float32, device=pred_mask_logits.device)
 	
     roi_weights = cat(roi_weights, dim=0).to(dtype=torch.float32,device=pred_mask_logits.device)
     
