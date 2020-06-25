@@ -47,9 +47,11 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     total_num_masks = pred_mask_logits.size(0)
     mask_side_len = pred_mask_logits.size(2)
     assert pred_mask_logits.size(2) == pred_mask_logits.size(3), "Mask prediction must be square!"
-	
-	EDGE_WEIGHT = 2
-	print('\nEdge weights:{}\n'.format(EDGE_WEIGHT))
+
+    EDGE_WEIGHT = 2
+    storage = get_event_storage()
+    if storage.iter % 20 == 0:
+        print('\nEdge weight:{}\n'.format(EDGE_WEIGHT))
 
     gt_classes = []
     weights = []
@@ -172,7 +174,7 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     )
     false_negative = (mask_incorrect & gt_masks_bool).sum().item() / max(num_positive, 1.0)
 
-    storage = get_event_storage()
+    # Visualization (default: disabled)
     storage.put_scalar("mask_rcnn/accuracy", mask_accuracy)
     storage.put_scalar("mask_rcnn/false_positive", false_positive)
     storage.put_scalar("mask_rcnn/false_negative", false_negative)
