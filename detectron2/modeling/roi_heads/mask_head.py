@@ -50,8 +50,8 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
 
     EDGE_WEIGHT = 2
     storage = get_event_storage()
-    if storage.iter % 20 == 0:
-        print('\nEdge weight:{}\n'.format(EDGE_WEIGHT))
+    if storage.iter % 1000 == 0:
+        print('Edge weight:{}'.format(EDGE_WEIGHT))
 
     gt_classes = []
     weights = []
