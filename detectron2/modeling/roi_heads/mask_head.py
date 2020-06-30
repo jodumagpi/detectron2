@@ -14,7 +14,7 @@ from itertools import combinations
 
 import numpy as np
 import cv2 as cv
-import pickle
+import pickle, os
 from shutil import copyfile
 from zipfile import ZipFile 
 
@@ -381,7 +381,7 @@ def quad(c):
 
     return torch.max(x1, x2)
 
-def get_all_file_paths(directory, exceptions): 
+def get_all_file_paths(directory): 
   
     # initializing empty file paths list 
     file_paths = [] 
