@@ -16,6 +16,7 @@ import numpy as np
 import cv2 as cv
 import pickle
 from shutil import copyfile
+from zipfile import ZipFile 
 
 ROI_MASK_HEAD_REGISTRY = Registry("ROI_MASK_HEAD")
 ROI_MASK_HEAD_REGISTRY.__doc__ = """
@@ -49,13 +50,17 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     mask_side_len = pred_mask_logits.size(2)
     assert pred_mask_logits.size(2) == pred_mask_logits.size(3), "Mask prediction must be square!"
 
-    EDGE_WEIGHT = 2
-    FILENAME = 'NO_WEIGHTS_RESNET50.pth'
+    EDGE_WEIGHT = 0
+    FILENAME = 'EXP_NAME'
+    file_paths = get_all_file_paths('./output/')
     storage = get_event_storage()
     if storage.iter % 1000 == 0:
         print('Edge weight:{}'.format(EDGE_WEIGHT))
-    if storage.iter > 0 and storage.iter % 5000 == 0:
-        copyfile('./output/model_final.pth', './drive/My Drive/{}'.format(FILENAME))
+    if storage.iter > 0 and storage.iter % 6000 == 0:
+        with ZipFile('{}.zip'.format(FILENAME),'w') as zip: 
+            for file in file_paths: 
+                zip.write(file) 
+        copyfile('./{}.zip'.format(FILENAME), './drive/My Drive/{}.zip'.format(FILENAME))
         print('Saving weights...')
 
     gt_classes = []
@@ -375,3 +380,18 @@ def quad(c):
     x2 = (1 - torch.sqrt(1-4*c)) / 2
 
     return torch.max(x1, x2)
+
+def get_all_file_paths(directory, exceptions): 
+  
+    # initializing empty file paths list 
+    file_paths = [] 
+  
+    # crawling through directory and subdirectories 
+    for root, directories, files in os.walk(directory): 
+        for filename in files: 
+            # join the two strings in order to form the full filepath.
+            if not filename.startswith('model_0'):
+                filepath = os.path.join(root, filename) 
+                file_paths.append(filepath) 
+    # returning all file paths 
+    return file_paths
