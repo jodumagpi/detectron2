@@ -15,6 +15,7 @@ from itertools import combinations
 import numpy as np
 import cv2 as cv
 import pickle
+from shutil import copyfile
 
 ROI_MASK_HEAD_REGISTRY = Registry("ROI_MASK_HEAD")
 ROI_MASK_HEAD_REGISTRY.__doc__ = """
@@ -49,9 +50,13 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     assert pred_mask_logits.size(2) == pred_mask_logits.size(3), "Mask prediction must be square!"
 
     EDGE_WEIGHT = 2
+    FILENAME = 'NO_WEIGHTS_RESNET50.pth'
     storage = get_event_storage()
     if storage.iter % 1000 == 0:
         print('Edge weight:{}'.format(EDGE_WEIGHT))
+    if storage.iter > 0 and storage.iter % 5000 == 0:
+        copyfile('./output/{}'.format(FILENAME), './drive/My Drive/{}'.format(FILENAME))
+        print('Saving weights...')
 
     gt_classes = []
     weights = []
