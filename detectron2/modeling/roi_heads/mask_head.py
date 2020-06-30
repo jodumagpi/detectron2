@@ -55,7 +55,7 @@ def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
     if storage.iter % 1000 == 0:
         print('Edge weight:{}'.format(EDGE_WEIGHT))
     if storage.iter > 0 and storage.iter % 5000 == 0:
-        copyfile('./output/{}'.format(FILENAME), './drive/My Drive/{}'.format(FILENAME))
+        copyfile('./output/model_final.pth', './drive/My Drive/{}'.format(FILENAME))
         print('Saving weights...')
 
     gt_classes = []
