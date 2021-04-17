@@ -15,6 +15,7 @@ from itertools import combinations
 import numpy as np
 import cv2 as cv
 import pickle, os
+import skimage.io as skio
 from shutil import copyfile
 from zipfile import ZipFile 
 
@@ -25,180 +26,6 @@ per-region features.
 
 The registered object will be called with `obj(cfg, input_shape)`.
 """
-
-
-def mask_rcnn_loss(pred_mask_logits, instances, vis_period=0):
-    """
-    Compute the mask prediction loss defined in the Mask R-CNN paper.
-
-    Args:
-        pred_mask_logits (Tensor): A tensor of shape (B, C, Hmask, Wmask) or (B, 1, Hmask, Wmask)
-            for class-specific or class-agnostic, where B is the total number of predicted masks
-            in all images, C is the number of foreground classes, and Hmask, Wmask are the height
-            and width of the mask predictions. The values are logits.
-        instances (list[Instances]): A list of N Instances, where N is the number of images
-            in the batch. These instances are in 1:1
-            correspondence with the pred_mask_logits. The ground-truth labels (class, box, mask,
-            ...) associated with each instance are stored in fields.
-        vis_period (int): the period (in steps) to dump visualization.
-
-    Returns:
-        mask_loss (Tensor): A scalar tensor containing the loss.
-    """
-    cls_agnostic_mask = pred_mask_logits.size(1) == 1
-    total_num_masks = pred_mask_logits.size(0)
-    mask_side_len = pred_mask_logits.size(2)
-    assert pred_mask_logits.size(2) == pred_mask_logits.size(3), "Mask prediction must be square!"
-
-    EDGE_WEIGHT = 0
-    FILENAME = 'EXP_NAME'
-    file_paths = get_all_file_paths('./output/')
-    storage = get_event_storage()
-    if storage.iter % 1000 == 0:
-        print('Edge weight:{}'.format(EDGE_WEIGHT))
-    if storage.iter > 0 and storage.iter % 6000 == 0:
-        with ZipFile('{}.zip'.format(FILENAME),'w') as zip: 
-            for file in file_paths: 
-                zip.write(file) 
-        copyfile('./{}.zip'.format(FILENAME), './drive/My Drive/{}.zip'.format(FILENAME))
-        print('Saving weights...')
-
-    gt_classes = []
-    weights = []
-    gt_masks = []
-    overlap = []
-    kernel = np.ones((3, 3),np.uint8)
-    roi_weights = []
-    for instances_per_image in instances:
-        # search for each ground truth mask for each instance
-        unq_gt_msk = []
-        unq_gt_msk_tensor = []
-        for i, mask in enumerate(instances_per_image.gt_masks):
-            if list(mask[0]) not in unq_gt_msk:
-                unq_gt_msk.append(list(mask[0]))
-                unq_gt_msk_tensor.append(mask[0])
-        
-        # create a volume of the ground truth mask for each ground truth box
-        per_ins_msk = []
-        for mask in unq_gt_msk_tensor:
-            temp_msk = []
-            for i in range(len(instances_per_image.gt_masks)):
-                temp_msk.append([mask])
-            per_ins_msk.append(PolygonMasks(temp_msk).crop_and_resize(
-                        instances_per_image.proposal_boxes.tensor, mask_side_len
-                        ).to(dtype=torch.float32, device=pred_mask_logits.device))
-
-        # search for unique ROIs 
-        gt_boxes = np.asarray([np.asarray(x.cpu()) for x in instances_per_image.gt_boxes])
-        unique_gt_boxes, roi_counts = np.unique(gt_boxes, axis=0, return_counts=True)
-        roi_counts = torch.from_numpy(roi_counts)
-
-        # find the ROIs that are the closest to the ground truth labels
-        close_iou_idx = []
-        for i in range(len(unique_gt_boxes)):
-            best_iou = 0
-            best_box = 0
-            for j, box in enumerate(instances_per_image.proposal_boxes):
-                if bb_intersection_over_union(unique_gt_boxes[i], box.detach().cpu().numpy()) > best_iou:
-                    best_iou = bb_intersection_over_union(unique_gt_boxes[i], box.detach().cpu().numpy())
-                    best_box = j
-            close_iou_idx.append(best_box)
-
-        # create weigthts for ROIs   
-        per_instance_roi = torch.ones((len(instances_per_image), 1, 1))
-        for p, i in enumerate(close_iou_idx):
-            per_instance_roi[i] = roi_counts[p]
-        roi_weights.append(per_instance_roi)
-
-        # get the real masks
-        if len(instances_per_image) == 0:
-            continue
-        if not cls_agnostic_mask:
-            gt_classes_per_image = instances_per_image.gt_classes.to(dtype=torch.int64)
-            gt_classes.append(gt_classes_per_image)
-
-        gt_masks_per_image = instances_per_image.gt_masks.crop_and_resize(
-            instances_per_image.proposal_boxes.tensor, mask_side_len
-        ).to(device=pred_mask_logits.device)
-
-        gt_masks.append(gt_masks_per_image)
-
-		# find the overlapped areas
-        if len(per_ins_msk) > 1: # there is a possibility of overlap
-            combs = combinations(per_ins_msk, 2) # pair up
-            temp = []
-            for c in combs:
-                temp.append(c[0]*c[1])
-            per_ins_overlap_masks = sum(temp)
-            per_ins_overlap_masks = per_ins_overlap_masks * gt_masks_per_image.to(dtype=torch.float32)
-        else:
-            per_ins_overlap_masks = torch.zeros(gt_masks_per_image.shape)
-        
-        overlap.append(per_ins_overlap_masks.to(device=pred_mask_logits.device))
-
-        # for per edge weights
-        for masks in gt_masks_per_image.detach().cpu().numpy():
-            bg = np.zeros((mask_side_len, mask_side_len))
-            cnts, _ = cv.findContours(np.where(masks == True, 255, 0).astype(np.uint8), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-            cv.drawContours(bg, cnts, -1, 255, -1)
-            dilation = cv.dilate(bg, kernel).astype(np.uint8)
-            erosion = cv.erode(bg, kernel).astype(np.uint8)
-            edges = np.asarray(np.where(np.bitwise_xor(dilation, erosion) == 255, True, False))
-            weights.append(torch.from_numpy(edges).unsqueeze(0))
-                
-    if len(gt_masks) == 0:
-        return pred_mask_logits.sum() * 0
-
-    gt_masks = cat(gt_masks, dim=0)
-	
-    overlap = cat(overlap, dim=0)
-    overlap = quad(overlap).to(dtype=torch.float32, device=pred_mask_logits.device)
-	
-    weights = cat(weights, dim=0)
-    weights = torch.from_numpy(np.where(weights == False, 1, EDGE_WEIGHT)).to(dtype=torch.float32, device=pred_mask_logits.device)
-	
-    roi_weights = cat(roi_weights, dim=0).to(dtype=torch.float32,device=pred_mask_logits.device)
-    
-    weights = overlap + weights + roi_weights
-
-    if cls_agnostic_mask:
-        pred_mask_logits = pred_mask_logits[:, 0]
-    else:
-        indices = torch.arange(total_num_masks)
-        gt_classes = cat(gt_classes, dim=0)
-        pred_mask_logits = pred_mask_logits[indices, gt_classes]
-
-    if gt_masks.dtype == torch.bool:
-        gt_masks_bool = gt_masks
-    else:
-        # Here we allow gt_masks to be float as well (depend on the implementation of rasterize())
-        gt_masks_bool = gt_masks > 0.5
-    gt_masks = gt_masks.to(dtype=torch.float32)
-
-    # Log the training accuracy (using gt classes and 0.5 threshold)
-    mask_incorrect = (pred_mask_logits > 0.0) != gt_masks_bool
-    mask_accuracy = 1 - (mask_incorrect.sum().item() / max(mask_incorrect.numel(), 1.0))
-    num_positive = gt_masks_bool.sum().item()
-    false_positive = (mask_incorrect & ~gt_masks_bool).sum().item() / max(
-        gt_masks_bool.numel() - num_positive, 1.0
-    )
-    false_negative = (mask_incorrect & gt_masks_bool).sum().item() / max(num_positive, 1.0)
-
-    # Visualization (default: disabled)
-    storage.put_scalar("mask_rcnn/accuracy", mask_accuracy)
-    storage.put_scalar("mask_rcnn/false_positive", false_positive)
-    storage.put_scalar("mask_rcnn/false_negative", false_negative)
-    if vis_period > 0 and storage.iter % vis_period == 0:
-        pred_masks = pred_mask_logits.sigmoid()
-        vis_masks = torch.cat([pred_masks, gt_masks], axis=2)
-        name = "Left: mask prediction;   Right: mask GT"
-        for idx, vis_mask in enumerate(vis_masks):
-            vis_mask = torch.stack([vis_mask] * 3, axis=0)
-            storage.put_image(name + f" ({idx})", vis_mask)
-            
-    mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, gt_masks, weight=weights, reduction="mean")
-    return mask_loss
-
 
 def mask_rcnn_inference(pred_mask_logits, pred_instances):
     """
@@ -249,6 +76,213 @@ class BaseMaskRCNNHead(nn.Module):
     def __init__(self, cfg, input_shape):
         super().__init__()
         self.vis_period = cfg.VIS_PERIOD
+        # learnable weight balancing parameters
+        self.alpha = nn.Parameter(torch.ones(1))
+        self.beta = nn.Parameter(torch.ones(1))
+        self.gamma = nn.Parameter(torch.ones(1))
+
+    def mask_rcnn_loss(self, pred_mask_logits, instances, vis_period=0):
+        """
+        Compute the mask prediction loss defined in the Mask R-CNN paper.
+        Args:
+            pred_mask_logits (Tensor): A tensor of shape (B, C, Hmask, Wmask) or (B, 1, Hmask, Wmask)
+                for class-specific or class-agnostic, where B is the total number of predicted masks
+                in all images, C is the number of foreground classes, and Hmask, Wmask are the height
+                and width of the mask predictions. The values are logits.
+            instances (list[Instances]): A list of N Instances, where N is the number of images
+                in the batch. These instances are in 1:1
+                correspondence with the pred_mask_logits. The ground-truth labels (class, box, mask,
+                ...) associated with each instance are stored in fields.
+            vis_period (int): the period (in steps) to dump visualization.
+        Returns:
+            mask_loss (Tensor): A scalar tensor containing the loss.
+        """
+
+        # pred_mask_logits initially contains all the mask prediction for each class
+
+        # -------------------------------------------------------------------------------------------- #
+
+        cls_agnostic_mask = pred_mask_logits.size(1) == 1
+        total_num_masks = pred_mask_logits.size(0)
+        mask_side_len = pred_mask_logits.size(2)
+        assert pred_mask_logits.size(2) == pred_mask_logits.size(3), "Mask prediction must be square!"
+
+        gt_classes = []
+        gt_masks = []
+
+        # -------------------------------------------------------------------------------------------- #
+
+        # containers of the weights per instance
+        boundary_penalty = [] 
+        roi_penalty = []
+        overlap_penalty = []
+        # hyperparameter
+        BNDRY_WT = 0
+        # save model wts and print info
+        FILENAME = 'EXP_NAME'
+        file_paths = get_all_file_paths('./output/')
+        storage = get_event_storage()
+        if storage.iter % 50 == 0:
+            print('Learnable weights: {}, {}, {}'.format(self.alpha.detach().item(), 
+                                            self.beta.detach().item(), self.gamma.detach().item()))
+        if storage.iter > 0 and storage.iter % 6000 == 0:
+            with ZipFile('{}.zip'.format(FILENAME),'w') as zip: 
+                for file in file_paths: 
+                    zip.write(file) 
+            copyfile('./{}.zip'.format(FILENAME), './drive/My Drive/{}.zip'.format(FILENAME))
+            print('Saving weights...')
+
+        for instances_per_image in instances:
+
+            # ---------------------------------------------------------------------------------------- #
+
+            if len(instances_per_image) == 0:
+                continue
+            if not cls_agnostic_mask:
+                gt_classes_per_image = instances_per_image.gt_classes.to(dtype=torch.int64)
+                gt_classes.append(gt_classes_per_image)
+
+            gt_masks_per_image = instances_per_image.gt_masks.crop_and_resize(
+                instances_per_image.proposal_boxes.tensor, mask_side_len
+            ).to(device=pred_mask_logits.device)
+            # A tensor of shape (N, M, M), N=#instances in the image; M=mask_side_len
+            gt_masks.append(gt_masks_per_image)
+
+            # ---------------------------------------------------------------------------------------- #
+
+            # get the boundary pixels
+            for m in gt_masks_per_image.detach().cpu().numpy(): # for each ground truth mask
+                kernel = np.ones((3,3), np.uint8) # small square kernel for dilation and erosion
+                background = np.zeros((mask_side_len, mask_side_len)) # container of the contour
+                cnts, _ = cv.findContours(np.where(m==True,255,0).astype(np.uint8), cv.RETR_EXTERNAL,
+                                                                    cv.CHAIN_APPROX_SIMPLE)
+                cv.drawContours(background, cnts, -1, 1, -1) # draw the contours to the container
+                dilation = cv.dilate(background, kernel).astype(np.uint8) # dilate the contours
+                erosion = cv.erode(background, kernel).astype(np.uint8) # erode the contours
+                bound_pixels = np.bitwise_xor(dilation, erosion) # get the boundary bixels
+                # aggregate the boundary pixels
+                boundary_penalty.append(torch.from_numpy(bound_pixels))
+                # for checks
+                # skio.imsave("dilated.png", dilation)
+                # skio.imsave("eroded.png", erosion)
+                # skio.imsave("boundary.png", bound_pixels)
+
+            # solve for roi penalty
+            # get the gt bboxes for each prediciton
+            ins_gt_boxes = np.asarray([x.detach().cpu().numpy() for x in instances_per_image.gt_boxes])
+            # get the real bboxes (unique) and the number of times they were predicted
+            gt_boxes, roi_counts = np.unique(ins_gt_boxes, axis=0, return_counts=True)
+            # find the ROIs that are the closest to the ground truth labels
+            # place holder for the roi penalty for each image
+            img_roi_penalty = torch.ones((len(instances_per_image), 1, 1))
+            for i, gt_box in enumerate(gt_boxes):
+                # solve for the current closest iou and the index of the current best bbox
+                best_iou, best_box = 0, 0
+                # loop over the predicted bboxes
+                for j, box in enumerate(instances_per_image.proposal_boxes):
+                    iou = bb_intersection_over_union(gt_box, box.detach().cpu().numpy())
+                    if best_iou < iou:
+                        best_iou = iou # replace current best iou
+                        best_box = j # save the index of the current best bbox
+                # after searching, place the penalty on the index of the closest bbox
+                img_roi_penalty[best_box] = torch.tensor(roi_counts[i].item())
+            # aggregate the roi penalties
+            roi_penalty.append(img_roi_penalty)
+
+            # get the overlapping pixels
+            # placeholder for the volume of gt masks for each gt bbox
+            img_masks = []
+            done = [] # placeholder for unique gt mask
+            for x in instances_per_image.gt_masks: 
+                if list(x[0]) not in done:
+                    done.append(list(x[0]))
+                    # generate the current gt mask for the instance for all predictions
+                    temp_msk = [[x[0]] for i in range(len(instances_per_image))]
+                    img_masks.append(PolygonMasks(temp_msk).crop_and_resize(
+                            instances_per_image.proposal_boxes.tensor, mask_side_len
+                            ).to(dtype=torch.float32, device="cuda"))
+            # there is possibly an overlap if there are more than 1 instance
+            if len(img_masks) > 1:
+                combs = combinations(img_masks, 2) # pair up for each bbox??
+                temp = []
+                for c in combs:
+                    temp.append(c[0]*c[1])
+                per_ins_overlap_masks = sum(temp)
+                per_ins_overlap_masks *= gt_masks_per_image.to(dtype=torch.float32)
+            else: # no overlap!
+                per_ins_overlap_masks = torch.zeros(gt_masks_per_image.shape)
+            # aggregate the overlap penalties
+            overlap_penalty.append(per_ins_overlap_masks.to(device="cuda"))
+            
+        # aggregate boundary pixels for each instance to create a volume of boundary masks
+        # convert the boundary to mask to penalty
+        boundary_penalty = torch.where(torch.stack(boundary_penalty)==1, torch.ones(1)*BNDRY_WT, 
+                                                                    torch.ones(1)).to(device="cuda")
+
+        # aggregate the roi penalties from each image
+        roi_penalty = torch.cat(roi_penalty, 0).to(device="cuda")
+
+        # aggregate the overlap penalties from each image
+        # get the real number of overlapping objects
+        overlap_penalty = quad(torch.cat(overlap_penalty, 0)).to(dtype=torch.float32, device="cuda")
+
+        # compute the total weights
+        weights = (self.alpha/(self.alpha+self.beta+self.gamma)) * boundary_penalty + \
+                    (self.beta/(self.alpha+self.beta+self.gamma)) * roi_penalty + \
+                    (self.gamma/(self.alpha+self.beta+self.gamma)) * overlap_penalty
+
+        # -------------------------------------------------------------------------------------------- #
+
+        if len(gt_masks) == 0:
+            return pred_mask_logits.sum() * 0
+
+        gt_masks = cat(gt_masks, dim=0)
+
+        if cls_agnostic_mask:
+            pred_mask_logits = pred_mask_logits[:, 0]
+        else:
+            indices = torch.arange(total_num_masks)
+            gt_classes = cat(gt_classes, dim=0)
+            pred_mask_logits = pred_mask_logits[indices, gt_classes]
+
+        if gt_masks.dtype == torch.bool:
+            gt_masks_bool = gt_masks
+        else:
+            # Here we allow gt_masks to be float as well (depend on the implementation of rasterize())
+            gt_masks_bool = gt_masks > 0.5
+        gt_masks = gt_masks.to(dtype=torch.float32)
+
+        # Log the training accuracy (using gt classes and 0.5 threshold)
+        mask_incorrect = (pred_mask_logits > 0.0) != gt_masks_bool
+        mask_accuracy = 1 - (mask_incorrect.sum().item() / max(mask_incorrect.numel(), 1.0))
+        num_positive = gt_masks_bool.sum().item()
+        false_positive = (mask_incorrect & ~gt_masks_bool).sum().item() / max(
+            gt_masks_bool.numel() - num_positive, 1.0
+        )
+        false_negative = (mask_incorrect & gt_masks_bool).sum().item() / max(num_positive, 1.0)
+
+        storage = get_event_storage()
+        storage.put_scalar("mask_rcnn/accuracy", mask_accuracy)
+        storage.put_scalar("mask_rcnn/false_positive", false_positive)
+        storage.put_scalar("mask_rcnn/false_negative", false_negative)
+        if vis_period > 0 and storage.iter % vis_period == 0:
+            pred_masks = pred_mask_logits.sigmoid()
+            vis_masks = torch.cat([pred_masks, gt_masks], axis=2)
+            name = "Left: mask prediction;   Right: mask GT"
+            for idx, vis_mask in enumerate(vis_masks):
+                vis_mask = torch.stack([vis_mask] * 3, axis=0)
+                storage.put_image(name + f" ({idx})", vis_mask)
+
+        # -------------------------------------------------------------------------------------------- #
+
+        # pred_mask_logits will then be left to only include the mask for the predicted instance
+
+        mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, gt_masks, reduction="none")
+
+        # weighted mask loss
+        weighted_mask_loss = (mask_loss * weights).mean()
+
+        return weighted_mask_loss
 
     def forward(self, x: Dict[str, torch.Tensor], instances: List[Instances]):
         """
@@ -266,7 +300,7 @@ class BaseMaskRCNNHead(nn.Module):
         """
         x = self.layers(x)
         if self.training:
-            return {"loss_mask": mask_rcnn_loss(x, instances, self.vis_period)}
+            return {"loss_mask": self.mask_rcnn_loss(x, instances, self.vis_period)}
         else:
             mask_rcnn_inference(x, instances)
             return instances
