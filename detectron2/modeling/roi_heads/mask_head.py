@@ -76,10 +76,8 @@ class BaseMaskRCNNHead(nn.Module):
     def __init__(self, cfg, input_shape):
         super().__init__()
         self.vis_period = cfg.VIS_PERIOD
-        # learnable weight balancing parameters
-        self.alpha = nn.Parameter(torch.ones(1))
-        self.beta = nn.Parameter(torch.ones(1))
-        self.gamma = nn.Parameter(torch.ones(1))
+        # log vars to learn the weights
+        self.log_vars = nn.Parameter(torch.zeros(3))
 
     def mask_rcnn_loss(self, pred_mask_logits, instances, vis_period=0):
         """
@@ -119,12 +117,11 @@ class BaseMaskRCNNHead(nn.Module):
         # hyperparameter
         BNDRY_WT = 0
         # save model wts and print info
-        FILENAME = 'EXP_NAME'
+        FILENAME = 'FILENAME'
         file_paths = get_all_file_paths('./output/')
         storage = get_event_storage()
         if storage.iter % 50 == 0:
-            print('Learnable weights: {}, {}, {}'.format(self.alpha.detach().item(), 
-                                            self.beta.detach().item(), self.gamma.detach().item()))
+            print('Learnable weights: {}'.format(self.log_vars.detach().cpu().numpy()))
         if storage.iter > 0 and storage.iter % 6000 == 0:
             with ZipFile('{}.zip'.format(FILENAME),'w') as zip: 
                 for file in file_paths: 
@@ -219,17 +216,17 @@ class BaseMaskRCNNHead(nn.Module):
         boundary_penalty = torch.where(torch.stack(boundary_penalty)==1, torch.ones(1)*BNDRY_WT, 
                                                                     torch.ones(1)).to(device="cuda")
 
+        #np.save("boundary.npy", boundary_penalty.detach().cpu().numpy())
+
         # aggregate the roi penalties from each image
         roi_penalty = torch.cat(roi_penalty, 0).to(device="cuda")
+        #np.save("roi.npy", roi_penalty.detach().cpu().numpy())
 
         # aggregate the overlap penalties from each image
         # get the real number of overlapping objects
         overlap_penalty = quad(torch.cat(overlap_penalty, 0)).to(dtype=torch.float32, device="cuda")
 
-        # compute the total weights
-        weights = (self.alpha/(self.alpha+self.beta+self.gamma)) * boundary_penalty + \
-                    (self.beta/(self.alpha+self.beta+self.gamma)) * roi_penalty + \
-                    (self.gamma/(self.alpha+self.beta+self.gamma)) * overlap_penalty
+        #np.save("overlap.npy", overlap_penalty.detach().cpu().numpy())
 
         # -------------------------------------------------------------------------------------------- #
 
@@ -277,12 +274,27 @@ class BaseMaskRCNNHead(nn.Module):
 
         # pred_mask_logits will then be left to only include the mask for the predicted instance
 
-        mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, gt_masks, reduction="none")
+        # apply penalties to the losses
+        boundary_mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, 
+                                gt_masks, weight=boundary_penalty, reduction="none").mean(1).mean(1)
 
-        # weighted mask loss
-        weighted_mask_loss = (mask_loss * weights).mean()
+        roi_mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, 
+                                gt_masks, weight=roi_penalty, reduction="none").mean(1).mean(1)
 
-        return weighted_mask_loss
+        overlap_mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, 
+                                gt_masks, weight=overlap_penalty, reduction="none").mean(1).mean(1)
+
+        # calcualte relative weighing of the losses
+        precision1 = torch.exp(-self.log_vars[0])
+        weighted_mask_loss = torch.sum(precision1 * boundary_mask_loss + self.log_vars[0], -1)
+
+        precision2 = torch.exp(-self.log_vars[1])
+        weighted_mask_loss += torch.sum(2 * roi_mask_loss + self.log_vars[1], -1)
+
+        precision3 = torch.exp(-self.log_vars[2])
+        weighted_mask_loss += torch.sum(precision3* overlap_mask_loss + self.log_vars[2], -1)
+        
+        return weighted_mask_loss.mean()
 
     def forward(self, x: Dict[str, torch.Tensor], instances: List[Instances]):
         """
