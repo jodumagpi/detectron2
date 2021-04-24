@@ -276,25 +276,25 @@ class BaseMaskRCNNHead(nn.Module):
 
         # apply penalties to the losses
         boundary_mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, 
-                                gt_masks, weight=boundary_penalty, reduction="none").mean(1).mean(1)
+                                gt_masks, weight=boundary_penalty, reduction="none")
 
         roi_mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, 
-                                gt_masks, weight=roi_penalty, reduction="none").mean(1).mean(1)
+                                gt_masks, weight=roi_penalty, reduction="none")
 
         overlap_mask_loss = F.binary_cross_entropy_with_logits(pred_mask_logits, 
-                                gt_masks, weight=overlap_penalty, reduction="none").mean(1).mean(1)
+                                gt_masks, weight=overlap_penalty, reduction="none")
 
         # calcualte relative weighing of the losses
         precision1 = torch.exp(-self.log_vars[0])
-        weighted_mask_loss = torch.sum(precision1 * boundary_mask_loss + self.log_vars[0], -1)
+        weighted_mask_loss = precision1 * boundary_mask_loss + self.log_vars[0]
 
         precision2 = torch.exp(-self.log_vars[1])
-        weighted_mask_loss += torch.sum(2 * roi_mask_loss + self.log_vars[1], -1)
+        weighted_mask_loss += precision2 * roi_mask_loss + self.log_vars[1]
 
         precision3 = torch.exp(-self.log_vars[2])
-        weighted_mask_loss += torch.sum(precision3* overlap_mask_loss + self.log_vars[2], -1)
+        weighted_mask_loss += precision3 * overlap_mask_loss + self.log_vars[2]
         
-        return weighted_mask_loss.mean()
+        return torch.mean(weighted_mask_loss)
 
     def forward(self, x: Dict[str, torch.Tensor], instances: List[Instances]):
         """
