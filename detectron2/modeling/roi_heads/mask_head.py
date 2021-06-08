@@ -114,13 +114,11 @@ class BaseMaskRCNNHead(nn.Module):
         boundary_penalty = [] 
         roi_penalty = []
         overlap_penalty = []
-        # hyperparameter
-        BNDRY_WT = 0
         # save model wts and print info
         FILENAME = 'FILENAME'
         file_paths = get_all_file_paths('./output/')
         storage = get_event_storage()
-        if storage.iter % 50 == 0:
+        if storage.iter % 20 == 0:
             print('Learnable weights: {}'.format(self.log_vars.detach().cpu().numpy()))
         if storage.iter > 0 and storage.iter % 6000 == 0:
             with ZipFile('{}.zip'.format(FILENAME),'w') as zip: 
@@ -148,21 +146,23 @@ class BaseMaskRCNNHead(nn.Module):
             # ---------------------------------------------------------------------------------------- #
 
             # get the boundary pixels
+            img_bounds = []
             for m in gt_masks_per_image.detach().cpu().numpy(): # for each ground truth mask
-                kernel = np.ones((3,3), np.uint8) # small square kernel for dilation and erosion
-                background = np.zeros((mask_side_len, mask_side_len)) # container of the contour
-                cnts, _ = cv.findContours(np.where(m==True,255,0).astype(np.uint8), cv.RETR_EXTERNAL,
-                                                                    cv.CHAIN_APPROX_SIMPLE)
-                cv.drawContours(background, cnts, -1, 1, -1) # draw the contours to the container
-                dilation = cv.dilate(background, kernel).astype(np.uint8) # dilate the contours
-                erosion = cv.erode(background, kernel).astype(np.uint8) # erode the contours
-                bound_pixels = np.bitwise_xor(dilation, erosion) # get the boundary bixels
-                # aggregate the boundary pixels
-                boundary_penalty.append(torch.from_numpy(bound_pixels))
-                # for checks
-                # skio.imsave("dilated.png", dilation)
-                # skio.imsave("eroded.png", erosion)
-                # skio.imsave("boundary.png", bound_pixels)
+                kernel = np.ones((3,3), np.uint8) # small square kernel for dilation
+                dist_map = np.ones((mask_side_len, mask_side_len))
+                dilated = cv.dilate(np.where(m==True,255,0).astype(np.uint8), kernel)
+                cnts, _ = cv.findContours(dilated, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+                c = cnts[0]
+                M = cv.moments(c)
+                cx = int(M['m10']/M['m00'])
+                cy = int(M['m01']/M['m00'])
+                for y in range(mask_side_len):
+                    for x in range(mask_side_len):
+                        if not dilated[y][x] == 0:
+                            d = np.linalg.norm(np.asarray([x, y]) - np.asarray([cx, cy]))
+                            dist_map[y][x] = d if d >= 1 else 1
+                img_bounds.append(dist_map)
+            boundary_penalty.append(torch.from_numpy(np.asarray(img_bounds)))
 
             # solve for roi penalty
             # get the gt bboxes for each prediciton
@@ -200,22 +200,18 @@ class BaseMaskRCNNHead(nn.Module):
                             ).to(dtype=torch.float32, device="cuda"))
             # there is possibly an overlap if there are more than 1 instance
             if len(img_masks) > 1:
-                combs = combinations(img_masks, 2) # pair up for each bbox??
-                temp = []
-                for c in combs:
-                    temp.append(c[0]*c[1])
-                per_ins_overlap_masks = sum(temp)
-                per_ins_overlap_masks *= gt_masks_per_image.to(dtype=torch.float32)
+                per_ins_overlap_masks = np.sum(np.asarray(img_masks), 0)
+                per_ins_overlap_masks *= gt_masks_per_image
+                per_ins_overlap_masks = torch.where(per_ins_overlap_masks == 0, 
+                                                        torch.tensor(1.).to(device="cuda"),
+                                                            per_ins_overlap_masks)
             else: # no overlap!
-                per_ins_overlap_masks = torch.zeros(gt_masks_per_image.shape)
+                per_ins_overlap_masks = torch.ones(gt_masks_per_image.shape)
             # aggregate the overlap penalties
             overlap_penalty.append(per_ins_overlap_masks.to(device="cuda"))
             
-        # aggregate boundary pixels for each instance to create a volume of boundary masks
-        # convert the boundary to mask to penalty
-        boundary_penalty = torch.where(torch.stack(boundary_penalty)==1, torch.ones(1)*BNDRY_WT, 
-                                                                    torch.ones(1)).to(device="cuda")
-
+        # aggregate boundary penalties for each image
+        boundary_penalty = torch.cat(boundary_penalty, 0).to(device="cuda")
         #np.save("boundary.npy", boundary_penalty.detach().cpu().numpy())
 
         # aggregate the roi penalties from each image
@@ -224,10 +220,8 @@ class BaseMaskRCNNHead(nn.Module):
 
         # aggregate the overlap penalties from each image
         # get the real number of overlapping objects
-        overlap_penalty = quad(torch.cat(overlap_penalty, 0)).to(dtype=torch.float32, device="cuda")
-
+        overlap_penalty = torch.cat(overlap_penalty, 0).to(device="cuda")
         #np.save("overlap.npy", overlap_penalty.detach().cpu().numpy())
-
         # -------------------------------------------------------------------------------------------- #
 
         if len(gt_masks) == 0:
@@ -388,6 +382,13 @@ class MaskRCNNConvUpsampleHead(BaseMaskRCNNHead):
         x = F.relu(self.deconv(x))
         return self.predictor(x)
 
+def build_mask_head(cfg, input_shape):
+    """
+    Build a mask head defined by `cfg.MODEL.ROI_MASK_HEAD.NAME`.
+    """
+    name = cfg.MODEL.ROI_MASK_HEAD.NAME
+    return ROI_MASK_HEAD_REGISTRY.get(name)(cfg, input_shape)
+
 def bb_intersection_over_union(boxA, boxB):
     # determine the (x, y)-coordinates of the intersection rectangle
     xA = max(boxA[0], boxB[0])
@@ -411,21 +412,6 @@ def bb_intersection_over_union(boxA, boxB):
 
     # return the intersection over union value
     return iou
-
-def build_mask_head(cfg, input_shape):
-    """
-    Build a mask head defined by `cfg.MODEL.ROI_MASK_HEAD.NAME`.
-    """
-    name = cfg.MODEL.ROI_MASK_HEAD.NAME
-    return ROI_MASK_HEAD_REGISTRY.get(name)(cfg, input_shape)
-
-
-def quad(c):
-    c = -2 * c
-    x1 = (1 + torch.sqrt(1-4*c)) / 2
-    x2 = (1 - torch.sqrt(1-4*c)) / 2
-
-    return torch.max(x1, x2)
 
 def get_all_file_paths(directory): 
   
