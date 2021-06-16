@@ -148,21 +148,25 @@ class BaseMaskRCNNHead(nn.Module):
             # get the boundary pixels
             img_bounds = []
             for m in gt_masks_per_image.detach().cpu().numpy(): # for each ground truth mask
-                kernel = np.ones((3,3), np.uint8) # small square kernel for dilation
-                dist_map = np.ones((mask_side_len, mask_side_len))
-                dilated = cv.dilate(np.where(m==True,255,0).astype(np.uint8), kernel)
-                cnts, _ = cv.findContours(dilated, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-                c = cnts[0]
+                kernel = np.ones((3,3), np.uint8) # small square kernel for dilation and erosion
+                background = np.zeros((mask_side_len, mask_side_len)) # container of the contour
+                cnts, _ = cv.findContours(np.where(m==True,255,0).astype(np.uint8), cv.RETR_EXTERNAL,
+                                                                    cv.CHAIN_APPROX_SIMPLE)
+                cv.drawContours(background, cnts, -1, 1, -1) # draw the contours to the container
+                dilation = cv.dilate(background, kernel).astype(np.uint8) # dilate the contours
+                erosion = cv.erode(background, kernel).astype(np.uint8) # erode the contours
+                bound_pixels = np.bitwise_xor(dilation, erosion) # get the boundary bixels
+                c = sorted(cnts, key=cv.contourArea, reverse=True)[0]
                 M = cv.moments(c)
-                cx = int(M['m10']/M['m00'])
-                cy = int(M['m01']/M['m00'])
-                for y in range(mask_side_len):
-                    for x in range(mask_side_len):
-                        if not dilated[y][x] == 0:
-                            d = np.linalg.norm(np.asarray([x, y]) - np.asarray([cx, cy]))
-                            dist_map[y][x] = d if d >= 1 else 1
-                img_bounds.append(dist_map)
-            boundary_penalty.append(torch.from_numpy(np.asarray(img_bounds)))
+                if not M['m00'] == 0:
+                    cx = int(M['m10']/M['m00'])
+                    cy = int(M['m01']/M['m00'])
+                    for y in range(mask_side_len):
+                        for x in range(mask_side_len):
+                            if not bound_pixels[y][x] == 0:
+                                d = np.linalg.norm(np.asarray([x, y]) - np.asarray([cx, cy]))
+                                bound_pixels[y][x] = d if d >= 1 else 1
+            boundary_penalty.append(torch.from_numpy(bound_pixels))
 
             # solve for roi penalty
             # get the gt bboxes for each prediciton
